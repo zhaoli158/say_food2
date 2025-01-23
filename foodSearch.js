@@ -7,6 +7,14 @@ let dataLoaded = false;
 // 添加搜索结果缓存
 const searchCache = new Map();
 
+// 初始化完成后隐藏加载提示
+function hideLoading() {
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    if (loadingIndicator) {
+        loadingIndicator.style.display = 'none';
+    }
+}
+
 async function loadFoodData() {
     try {
         // 只加载基础数据
@@ -721,11 +729,17 @@ async function loadFoodData() {
         Object.assign(foodDatabase, basicFoods);
         
         dataLoaded = true;
+        hideLoading(); // 数据加载完成后隐藏加载提示
         return basicFoods;
         
     } catch (error) {
         console.error('加载食物数据失败:', error);
         dataLoaded = false;
+        // 显示错误信息
+        const loadingText = document.getElementById('loadingText');
+        if (loadingText) {
+            loadingText.textContent = '加载失败，请刷新重试';
+        }
         return {};
     }
 }
@@ -1111,13 +1125,40 @@ function initializeImageUpload() {
                 return;
             }
 
+            // 检查文件大小
+            if (file.size > 4 * 1024 * 1024) {
+                alert('图片大小不能超过4MB');
+                return;
+            }
+
             const reader = new FileReader();
             reader.onload = (e) => {
                 preview.src = e.target.result;
                 preview.style.display = 'block';
                 
-                // 开始识别图片
-                analyzeImage(e.target.result);
+                // 压缩图片
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    
+                    // 计算压缩后的尺寸
+                    let width = img.width;
+                    let height = img.height;
+                    if (width > 1024) {
+                        height = height * (1024 / width);
+                        width = 1024;
+                    }
+                    
+                    canvas.width = width;
+                    canvas.height = height;
+                    ctx.drawImage(img, 0, 0, width, height);
+                    
+                    // 获取压缩后的图片数据
+                    const compressedData = canvas.toDataURL('image/jpeg', 0.8);
+                    analyzeImage(compressedData);
+                };
+                img.src = e.target.result;
             };
             reader.readAsDataURL(file);
         }
@@ -1146,12 +1187,66 @@ async function analyzeImage(imageData) {
             offlineMode.style.display = isOnline ? 'none' : 'block';
         }
 
-        // 调用识别API（这里需要替换为实际的API调用）
-        const response = await recognizeFood(imageData);
+        // 调用 Clarifai API
+        const response = await fetch(
+            `https://api.clarifai.com/v2/models/${CONFIG.MODEL_ID}/outputs`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Key ${CONFIG.CLARIFAI_API_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    "inputs": [{
+                        "data": {
+                            "image": {
+                                "base64": imageData.split(',')[1]
+                            }
+                        }
+                    }]
+                })
+            }
+        );
+  
+        if (!response.ok) {
+            throw new Error('API 请求失败');
+        }
 
-        // 显示识别结果
-        if (response && response.success) {
-            displayFoodResults(response.results);
+        const resultJson = await response.json();
+        
+        // 处理识别结果
+        const concepts = resultJson.outputs[0].data.concepts;
+        // 获取前5个最可能的结果
+        const topConcepts = concepts.slice(0, 5);
+        
+        // 在数据库中查找对应食物
+        let foodInfo = null;
+        let matchedName = null;
+        
+        // 遍历所有可能的识别结果
+        for (const concept of topConcepts) {
+            const englishName = concept.name.toLowerCase();
+            // 检查数据库中的每个食物
+            for (const [name, info] of Object.entries(foodDatabase)) {
+                if (window.foodAliases[name] && 
+                    window.foodAliases[name].some(alias => 
+                        alias.toLowerCase().includes(englishName) ||
+                        englishName.includes(alias.toLowerCase())
+                    )) {
+                    foodInfo = info;
+                    matchedName = name;
+                    break;
+                }
+            }
+            if (foodInfo) break;
+        }
+
+        if (foodInfo) {
+            displayFoodResults({
+                name: matchedName,
+                ...foodInfo,
+                confidence: Math.round(topConcepts[0].value * 100)
+            });
         } else {
             displayNonFoodMessage();
         }
@@ -1163,7 +1258,12 @@ async function analyzeImage(imageData) {
                 <svg viewBox="0 0 24 24" width="24" height="24">
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/>
                 </svg>
-                <span>识别失败: ${error.message}</span>
+                <span>识别失败，请检查：</span>
+                <ul>
+                    <li>网络连接是否正常</li>
+                    <li>图片是否清晰</li>
+                    <li>是否是食物图片</li>
+                </ul>
                 <button onclick="retryAnalyze()" class="retry-btn">重试</button>
             </div>
         `;
@@ -1172,19 +1272,19 @@ async function analyzeImage(imageData) {
 }
 
 // 显示食物识别结果
-function displayFoodResults(results) {
+function displayFoodResults(food) {
     const result = document.getElementById('result');
     if (!result) return;
 
-    const resultsHtml = results.map(item => `
-        <div class="result-item ${getConfidenceClass(item.confidence)}">
-            <span class="food-name">${item.name}</span>
+    const resultsHtml = `
+        <div class="result-item high-confidence">
+            <span class="food-name">${food.name}</span>
             <div class="confidence-bar">
-                <div class="confidence-fill" style="width: ${item.confidence}%"></div>
-                <span class="confidence-text">${item.confidence}%</span>
+                <div class="confidence-fill" style="width: ${food.confidence}%"></div>
+                <span class="confidence-text">${food.confidence}%</span>
             </div>
         </div>
-    `).join('');
+    `;
 
     result.innerHTML = `
         <div class="results-container">
@@ -1193,15 +1293,22 @@ function displayFoodResults(results) {
                 ${resultsHtml}
             </div>
             <div class="nutrition-info">
-                <h4>营养信息参考：</h4>
-                <p>卷心菜（每100g）:</p>
+                <h4>营养信息：</h4>
+                <p>${food.name}（每${food.serving}）:</p>
                 <ul>
-                    <li>热量: 25千卡</li>
-                    <li>蛋白质: 1.3g</li>
-                    <li>碳水化合物: 5.8g</li>
-                    <li>膳食纤维: 2.5g</li>
-                    <li>维生素C: 36mg</li>
+                    <li>热量: ${food.calories}千卡</li>
+                    <li>蛋白质: ${food.protein}g</li>
+                    <li>碳水化合物: ${food.carbs}g</li>
+                    <li>膳食纤维: ${food.fiber}g</li>
+                    <li>脂肪: ${food.fat}g</li>
                 </ul>
+                <div class="diabetes-info ${food.diabetesFriendly ? 'friendly' : 'warning'}">
+                    <span class="gi-label">血糖指数(GI): ${food.glycemicIndex}</span>
+                    <span class="diabetes-friendly-label">
+                        ${food.diabetesFriendly ? '适合' : '不适合'}血糖控制人群
+                    </span>
+                    <p class="health-tips">${food.healthTips}</p>
+                </div>
             </div>
         </div>
     `;
@@ -1239,30 +1346,6 @@ function retryAnalyze() {
     }
 }
 
-// 模拟识别API调用（需要替换为实际的API）
-async function recognizeFood(imageData) {
-    // 这里暂时使用模拟数据，等 API 配置好后再替换
-    return new Promise((resolve) => {
-        setTimeout(() => {
-            resolve({
-                success: true,
-                results: [
-                    { name: '卷心菜', confidence: 98 },
-                    { name: '生菜', confidence: 85 },
-                    { name: '蔬菜', confidence: 92 }
-                ]
-            });
-        }, 2000);
-    });
-}
-
-// 根据置信度返回对应的CSS类
-function getConfidenceClass(confidence) {
-    if (confidence >= 90) return 'high-confidence';
-    if (confidence >= 70) return 'medium-confidence';
-    return 'low-confidence';
-}
-
 // 限制缓存大小
 setInterval(() => {
     if (searchCache.size > 100) {
@@ -1272,37 +1355,39 @@ setInterval(() => {
 
 // 初始化时设置全局别名映射
 window.foodAliases = {
-    "米饭": ["米饭", "大米", "白米", "米", "rice"],
-    "糙米饭": ["糙米", "糙米饭", "糙大米", "brown rice"],
-    "面包": ["面包", "白面包", "吐司", "bread"],
-    "全麦面包": ["全麦", "全麦面包", "全麦吐司", "wheat bread"],
-    "燕麦片": ["燕麦", "燕麦片", "麦片", "oats", "oatmeal"],
-    "红薯": ["红薯", "地瓜", "番薯", "sweet potato"],
-    "鸡胸肉": ["鸡胸", "鸡胸肉", "鸡肉", "chicken breast"],
-    "豆腐": ["豆腐", "内酯豆腐", "老豆腐", "嫩豆腐", "tofu"],
-    "香蕉": ["香蕉", "banana"],
-    "核桃": ["核桃", "walnut"],
-    "卷心菜": ["卷心菜", "包菜", "洋白菜", "圆白菜", "cabbage"],
-    "西兰花": ["西兰花", "花椰菜", "绿花菜", "broccoli"],
-    "菠菜": ["菠菜", "spinach"],
-    "巧克力": ["巧克力", "朱古力", "可可", "chocolate"],
-    "饼干": ["饼干", "曲奇", "cookie", "cookies", "夹心饼"],
-    "薯片": ["薯片", "马铃薯片", "薯条", "chips", "potato chips"],
-    "果冻": ["果冻", "布丁", "果冻布丁", "jelly"],
-    "坚果混合": ["坚果", "什锦坚果", "混合坚果", "混合果仁", "nuts"],
-    "棒棒糖": ["棒棒糖", "糖果", "棒糖", "lollipop", "candy"],
-    "爆米花": ["爆米花", "玉米花", "popcorn"],
-    "可乐": ["可乐", "汽水", "碳酸饮料", "cola", "coke"],
-    "香草冰淇淋": ["冰淇淋", "香草冰淇淋", "奶油冰淇淋", "ice cream"],
-    "蛋糕": ["蛋糕", "蛋糕卷", "奶油蛋糕", "cake"],
-    "奶茶": ["奶茶", "珍珠奶茶", "波霸奶茶", "milk tea", "bubble tea"],
-    "巧克力牛奶": ["巧克力牛奶", "巧克力味牛奶", "可可牛奶", "chocolate milk"],
-    "橙汁": ["橙汁", "鲜榨橙汁", "橙子汁", "orange juice"],
-    "绿茶": ["绿茶", "茶", "龙井", "碧螺春", "green tea"],
-    "苹果汁": ["苹果汁", "鲜榨苹果汁", "apple juice"],
-    "咖啡": ["咖啡", "美式咖啡", "黑咖啡", "coffee"],
-    "酸奶": ["酸奶", "酸牛奶", "优酪乳", "yogurt"],
-    "豆浆": ["豆浆", "豆奶", "大豆饮品", "soy milk"],
-    "运动饮料": ["运动饮料", "功能饮料", "能量饮料", "sports drink"],
-    "柠檬水": ["柠檬水", "柠檬汁", "柠檬饮", "lemonade"]
-}; 
+    "米饭": ["rice", "cooked rice", "white rice"],
+    "面包": ["bread", "loaf", "toast"],
+    "鸡胸肉": ["chicken breast", "chicken", "grilled chicken"],
+    "豆腐": ["tofu", "bean curd"],
+    "香蕉": ["banana", "bananas"],
+    "苹果": ["apple", "apples"],
+    "西兰花": ["broccoli"],
+    "卷心菜": ["cabbage"],
+    "巧克力": ["chocolate", "chocolates"],
+    "薯片": ["chips", "potato chips", "crisps"],
+    "果冻": ["jelly", "gelatin"],
+    "坚果": ["nuts", "mixed nuts", "almonds", "walnuts"],
+    "冰淇淋": ["ice cream", "icecream"],
+    "蛋糕": ["cake", "pastry"],
+    "奶茶": ["milk tea", "bubble tea"],
+    "咖啡": ["coffee", "espresso"],
+    "酸奶": ["yogurt", "yoghurt"],
+    "豆浆": ["soy milk", "soymilk"],
+    "柠檬水": ["lemonade", "lemon water"]
+};
+
+// 监听网络状态
+window.addEventListener('online', () => {
+    const offlineMode = document.getElementById('offlineMode');
+    if (offlineMode) {
+        offlineMode.style.display = 'none';
+    }
+});
+
+window.addEventListener('offline', () => {
+    const offlineMode = document.getElementById('offlineMode');
+    if (offlineMode) {
+        offlineMode.style.display = 'block';
+    }
+    alert('网络连接已断开，请检查网络设置');
+}); 

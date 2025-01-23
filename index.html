@@ -4,20 +4,19 @@
     <!-- 预加载关键资源 -->
     <link rel="preload" href="style.css" as="style">
     <link rel="preload" href="foodSearch.js" as="script">
+    <link rel="preload" href="config.js" as="script">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>食物营养查询</title>
     <link rel="stylesheet" href="style.css">
     <!-- 仅在需要时动态加载 TensorFlow -->
+    <script src="config.js"></script>
 </head>
 <body>
     <!-- 加载提示 -->
     <div id="loadingIndicator" class="loading-indicator">
         <div class="loading-spinner"></div>
         <p id="loadingText">正在加载基础功能...</p>
-        <div class="loading-progress">
-            <div id="loadingBar" class="loading-bar"></div>
-        </div>
     </div>
     <div class="container">
         <!-- 选择界面 -->
