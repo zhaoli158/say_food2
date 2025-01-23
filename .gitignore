@@ -1,0 +1,6 @@
+# API 配置文件
+# config.js 
+
+.DS_Store
+node_modules/
+.env 
